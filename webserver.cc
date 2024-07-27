@@ -9,13 +9,17 @@
 #include <thread>
 #include <vector>
 #include <csignal>
-
+#include <mutex>
+#include <algorithm>
 using namespace std;
+
+mutex pool_mutex;
 
 vector<thread> THREAD_POOL;
 
 void signal_handler(int sig_num)
 {
+    lock_guard<mutex> guard(pool_mutex);  // Lock the mutex before accessing THREAD_POOL
     while (!THREAD_POOL.empty())
     {
         THREAD_POOL.back().join();
@@ -25,7 +29,7 @@ void signal_handler(int sig_num)
     exit(sig_num);
 }
 
-void foo(int &client)
+void foo(int client)
 {
     char buffer[5000] = { 0 };
     if (recv(client, (char*)&buffer, sizeof(buffer), 0) == 0)
@@ -72,7 +76,7 @@ int main(int argc, char* argv[])
     signal(SIGINT, signal_handler);
     if (argc != 2)
     {
-        cerr << "Usage: ./webserver2 {port}" << endl;
+        cerr << "Usage: ./webserver {port}" << endl;
         exit(0);
     }
     int portNum = atoi(argv[1]);
@@ -94,8 +98,24 @@ int main(int argc, char* argv[])
     while((client = accept(mainServer, (sockaddr*)&clientAddr, &clientAddrSize)) > 0)
     {
         cout << "Connection established." << endl;
-        thread newThread(foo, ref(client));
-        THREAD_POOL.push_back(move(newThread));
+        thread newThread(foo, client);
+
+        {
+            lock_guard<mutex> guard(pool_mutex);  // Lock the mutex before modifying THREAD_POOL
+            THREAD_POOL.push_back(move(newThread));
+
+            // Cleanup finished threads
+            THREAD_POOL.erase(
+                remove_if(THREAD_POOL.begin(), THREAD_POOL.end(), [](thread &t) {
+                    if (t.joinable()) {
+                        t.join();
+                        return true;
+                    }
+                    return false;
+                }),
+                THREAD_POOL.end()
+            );
+        }
     }
     close(mainServer);
     return 0;
